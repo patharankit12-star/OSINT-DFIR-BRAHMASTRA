@@ -1,0 +1,9 @@
+api_keys:
+  virustotal: "YOUR_VIRUSTOTAL_API_KEY"
+  hunter_io: "YOUR_HUNTER_IO_API_KEY"
+  github: "YOUR_GITHUB_TOKEN"
+  gemini: "YOUR_GEMINI_API_KEY"
+
+settings:
+  default_depth: 2
+  ai_provider: "gemini"  # Options: gemini, ollama

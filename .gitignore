@@ -1,0 +1,19 @@
+# Virtual Environment & Python Cache
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# PyCharm IDE Files
+.idea/
+
+# Sensitive API Keys & Local Secrets
+config.yaml
+.env
+
+# Investigation Evidence & Local Databases
+cases/*
+!cases/.gitkeep
+*.db
+*.sqlite3
