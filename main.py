@@ -10,9 +10,50 @@ from core.database import CaseDatabase
 from core.orchestrator import AutoPivotOrchestrator
 from modules.dfir_extractor import DFIRExtractor
 
-# Initialize Typer CLI app and Rich console for styled output
 app = typer.Typer(help="OSINT-DFIR-BRAHMASTRA: Unified Forensic & OSINT Automation Framework")
 console = Console()
+
+
+def _display_grouped_osint_table(db: CaseDatabase, case: str, target: str, title_prefix: str):
+    """Helper to display OSINT findings grouped by tool with a 1-line spacer between tools."""
+    all_findings = db.get_all_osint_findings()
+    target_clean = target.strip().lower().lstrip("@")
+    findings = [
+        f for f in all_findings
+        if f["target"].lower() == target_clean or target_clean in f["target"].lower()
+    ]
+
+    tool_order = [
+        "whois", "dns", "crt.sh", "virustotal", "hunter_io",
+        "phone_osint",
+        "email_hygiene", "xposedornot", "gravatar", "github_search", "holehe",
+        "username_scan", "github_api", "github_patch", "sherlock",
+    ]
+
+    grouped = {}
+    for f in findings:
+        grouped.setdefault(f["source_tool"], []).append(f)
+
+    table = Table(title=f"{title_prefix}: {target} (Case: {case})", border_style="cyan")
+    table.add_column("Source Tool", style="bold yellow")
+    table.add_column("Field / Type", style="bold magenta")
+    table.add_column("Extracted Value", style="green")
+
+    added_sections = 0
+    ordered_tools = [t for t in tool_order if t in grouped] + [t for t in grouped if t not in tool_order]
+
+    for tool_name in ordered_tools:
+        if added_sections > 0:
+            table.add_row("", "", "")
+        for idx, item in enumerate(grouped[tool_name]):
+            label = tool_name.upper() if idx == 0 else ""
+            table.add_row(label, item["finding_type"], item["finding_value"])
+        added_sections += 1
+
+    if added_sections > 0:
+        console.print(table)
+    else:
+        console.print("[yellow]No OSINT findings returned for this target.[/yellow]")
 
 
 @app.command()
@@ -20,15 +61,8 @@ def analyze(
     case: str = typer.Option(..., "--case", "-c", help="Name of the investigation case (e.g., case_01)"),
     file: str = typer.Option(..., "--file", "-f", help="Path to the suspicious file to analyze"),
 ):
-    """
-    Engine 1: Run full DFIR artifact extraction (Hashes, ExifTool, Gitleaks, IOCs) on a file.
-    """
-    console.print(
-        Panel.fit(
-            "[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold yellow]Engine 1: DFIR Artifact Extractor[/bold yellow]",
-            border_style="cyan",
-        )
-    )
+    """Engine 1: Run full DFIR artifact extraction (Hashes, ExifTool, Gitleaks, IOCs) on a file."""
+    console.print(Panel.fit("[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold yellow]Engine 1: DFIR Artifact Extractor[/bold yellow]", border_style="cyan"))
 
     db = CaseDatabase(case_name=case)
     extractor = DFIRExtractor(db=db)
@@ -52,8 +86,6 @@ def analyze(
             for s in result["secrets"]:
                 secret_table.add_row(s["type"], s["value"])
             console.print(secret_table)
-        else:
-            console.print("[dim]No leaked secrets or C2 tokens found.[/dim]")
 
         if result["iocs"]:
             ioc_table = Table(title="Extracted IOCs & Attribution Leads", border_style="magenta")
@@ -62,8 +94,6 @@ def analyze(
             for ioc in result["iocs"]:
                 ioc_table.add_row(ioc["type"], ioc["value"])
             console.print(ioc_table)
-        else:
-            console.print("[dim]No regex IOCs found.[/dim]")
 
         if result["metadata"]:
             meta_table = Table(title=f"ExifTool Metadata (Total: {result['metadata_count']} tags)", border_style="blue")
@@ -74,11 +104,8 @@ def analyze(
             console.print(meta_table)
 
         console.print(f"\n[bold green]✔ Extraction complete! All evidence saved to cases/{case}.db[/bold green]")
-
-    except FileNotFoundError as e:
-        console.print(f"[bold red]Error:[/bold red] {e}")
     except Exception as e:
-        console.print(f"[bold red]Unexpected Error:[/bold red] {e}")
+        console.print(f"[bold red]Error:[/bold red] {e}")
     finally:
         db.close()
 
@@ -86,122 +113,111 @@ def analyze(
 @app.command()
 def recon(
     case: str = typer.Option(..., "--case", "-c", help="Name of the investigation case"),
-    target: str = typer.Option(..., "--target", "-t", help="Target Domain, Email, or Username"),
-    target_type: Optional[str] = typer.Option(
-        None, "--type", help="Optional: DOMAIN, EMAIL, or USERNAME (auto-detected if omitted)"
-    ),
+    target: str = typer.Option(..., "--target", "-t", help="Target Domain, Email, Username, or Phone"),
+    target_type: Optional[str] = typer.Option(None, "--type", help="Optional: DOMAIN, EMAIL, USERNAME, or PHONE"),
 ):
-    """
-    Engine 2: Run direct OSINT recon (WHOIS, DNS, crt.sh, VT, Hunter, GitHub .patch) on a target.
-    """
-    console.print(
-        Panel.fit(
-            "[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold yellow]Engine 2: OSINT Recon[/bold yellow]",
-            border_style="cyan",
-        )
-    )
+    """Engine 2: Run direct OSINT recon on a Domain (WHOIS, DNS, crt.sh, VT, Hunter)."""
+    console.print(Panel.fit("[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold yellow]Engine 2: OSINT Recon[/bold yellow]", border_style="cyan"))
 
-    # Auto-detect target type if not explicitly provided
     if not target_type:
         if "@" in target:
             target_type = "EMAIL"
+        elif target.startswith("+") or target.replace(" ", "").replace("-", "").isdigit():
+            target_type = "PHONE"
         elif "." in target:
             target_type = "DOMAIN"
         else:
             target_type = "USERNAME"
 
     db = CaseDatabase(case_name=case)
-    config = ConfigManager()
-    orchestrator = AutoPivotOrchestrator(db=db, config=config, console=console)
-
+    orchestrator = AutoPivotOrchestrator(db=db, config=ConfigManager(), console=console)
     try:
-        with console.status(
-            f"[bold green]Running {target_type} recon on {target} (high-latency mode)...[/bold green]",
-            spinner="dots",
-        ):
+        with console.status(f"[bold green]Running {target_type} recon on {target}...[/bold green]", spinner="dots"):
             orchestrator.run_single_recon(target, target_type)
-
-        # Fetch findings and group them cleanly by tool in a single unified table
-        all_findings = db.get_all_osint_findings()
-        target_clean = target.strip().lower()
-        # Filter findings for the current target
-        findings = [f for f in all_findings if f["target"].lower() == target_clean or target_clean in f["target"].lower()]
-
-        # Define exact display order for tools
-        tool_order = [
-            "whois",
-            "dns",
-            "crt.sh",
-            "virustotal",
-            "hunter_io",
-            "github_api",
-            "github_patch",
-            "github_search",
-            "holehe",
-        ]
-
-        # Group findings by source_tool
-        grouped = {}
-        for f in findings:
-            src = f["source_tool"]
-            grouped.setdefault(src, []).append(f)
-
-        table = Table(title=f"OSINT Recon Report: {target} (Case: {case})", border_style="cyan")
-        table.add_column("Source Tool", style="bold yellow")
-        table.add_column("Field / Type", style="bold magenta")
-        table.add_column("Extracted Value", style="green")
-
-        # Add each tool's section with a blank spacer line between tools
-        added_sections = 0
-        ordered_tools = [t for t in tool_order if t in grouped] + [t for t in grouped if t not in tool_order]
-
-        for tool_name in ordered_tools:
-            if added_sections > 0:
-                # Add one blank line space between different tool results
-                table.add_row("", "", "")
-
-            rows = grouped[tool_name]
-            for idx, item in enumerate(rows):
-                # Show tool name on the first row of its block for clean readability
-                label = tool_name.upper() if idx == 0 else ""
-                table.add_row(label, item["finding_type"], item["finding_value"])
-
-            added_sections += 1
-
-        if added_sections > 0:
-            console.print(table)
-        else:
-            console.print("[yellow]No OSINT findings returned for this target.[/yellow]")
-
+        _display_grouped_osint_table(db, case, target, "OSINT Recon Report")
         console.print(f"\n[bold green]✔ Recon complete! Saved to cases/{case}.db[/bold green]")
-
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
     finally:
         db.close()
+
+
+@app.command()
+def phone(
+    case: str = typer.Option(..., "--case", "-c", help="Name of the investigation case"),
+    number: str = typer.Option(..., "--phone", "-p", help="Target phone number (e.g., +919876543210)"),
+):
+    """Engine 3: Run Mobile Number OSINT (Carrier, Location, VoIP check, WhatsApp/Telegram & Google Dorks)."""
+    console.print(Panel.fit("[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold yellow]Engine 3: Mobile Number OSINT[/bold yellow]", border_style="cyan"))
+
+    db = CaseDatabase(case_name=case)
+    orchestrator = AutoPivotOrchestrator(db=db, config=ConfigManager(), console=console)
+    try:
+        with console.status(f"[bold green]Analyzing phone number {number}...[/bold green]", spinner="dots"):
+            res = orchestrator.run_single_recon(number, "PHONE")
+        lookup_key = res.get("e164", number)
+        _display_grouped_osint_table(db, case, lookup_key, "Phone OSINT Report")
+        console.print(f"\n[bold green]✔ Phone OSINT complete! Saved to cases/{case}.db[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+    finally:
+        db.close()
+
+
+@app.command()
+def email(
+    case: str = typer.Option(..., "--case", "-c", help="Name of the investigation case"),
+    address: str = typer.Option(..., "--email", "-e", help="Target email address"),
+):
+    """Engine 3: Run Deep Email OSINT (MX/Disposable, XposedOrNot Breaches, Gravatar, GitHub, Holehe)."""
+    console.print(Panel.fit("[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold yellow]Engine 3: Email OSINT[/bold yellow]", border_style="cyan"))
+
+    db = CaseDatabase(case_name=case)
+    orchestrator = AutoPivotOrchestrator(db=db, config=ConfigManager(), console=console)
+    try:
+        with console.status(f"[bold green]Running deep email OSINT on {address}...[/bold green]", spinner="dots"):
+            orchestrator.run_single_recon(address, "EMAIL")
+        _display_grouped_osint_table(db, case, address, "Email OSINT Report")
+        console.print(f"\n[bold green]✔ Email OSINT complete! Saved to cases/{case}.db[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+    finally:
+        db.close()
+
+
+@app.command()
+def username(
+    case: str = typer.Option(..., "--case", "-c", help="Name of the investigation case"),
+    user: str = typer.Option(..., "--username", "-u", help="Target username / handle"),
+):
+    """Engine 3: Run Deep Username OSINT (Multi-platform scan, GitHub .patch carving, Sherlock)."""
+    console.print(Panel.fit("[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold yellow]Engine 3: Username OSINT[/bold yellow]", border_style="cyan"))
+
+    db = CaseDatabase(case_name=case)
+    orchestrator = AutoPivotOrchestrator(db=db, config=ConfigManager(), console=console)
+    try:
+        with console.status(f"[bold green]Scanning platforms & GitHub for '{user}'...[/bold green]", spinner="dots"):
+            orchestrator.run_single_recon(user, "USERNAME")
+        _display_grouped_osint_table(db, case, user, "Username OSINT Report")
+        console.print(f"\n[bold green]✔ Username OSINT complete! Saved to cases/{case}.db[/bold green]")
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+    finally:
+        db.close()
+
 
 @app.command()
 def autopivot(
     case: str = typer.Option(..., "--case", "-c", help="Name of the existing investigation case"),
     depth: int = typer.Option(2, "--depth", "-d", help="How many AI pivot levels deep to investigate (1-3)"),
 ):
-    """
-    Engine 2 (AI Brain): Autonomously analyze case DB with Gemini AI and pivot to new OSINT targets.
-    """
-    console.print(
-        Panel.fit(
-            "[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold magenta]Autonomous AI Pivot Brain[/bold magenta]",
-            border_style="magenta",
-        )
-    )
+    """Engine 2 (AI Brain): Autonomously analyze case DB with Gemini AI and pivot to new OSINT targets."""
+    console.print(Panel.fit("[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold magenta]Autonomous AI Pivot Brain[/bold magenta]", border_style="magenta"))
 
     db = CaseDatabase(case_name=case)
-    config = ConfigManager()
-    orchestrator = AutoPivotOrchestrator(db=db, config=config, console=console)
-
+    orchestrator = AutoPivotOrchestrator(db=db, config=ConfigManager(), console=console)
     try:
         result = orchestrator.run_autopivot(max_depth=depth)
-
         if result["executed_pivots"]:
             pivot_table = Table(title="Executed AI Pivots", border_style="magenta")
             pivot_table.add_column("Depth", style="cyan")
@@ -211,7 +227,6 @@ def autopivot(
             for p in result["executed_pivots"]:
                 pivot_table.add_row(str(p["depth"]), p["type"], p["target"], p["reason"])
             console.print(pivot_table)
-
         console.print(f"\n[bold green]✔ AI Auto-Pivot complete! Full intel saved in cases/{case}.db[/bold green]")
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
@@ -221,12 +236,9 @@ def autopivot(
 
 @app.command(name="list-cases")
 def list_cases():
-    """
-    List all existing SQLite investigation cases stored in the cases/ directory.
-    """
+    """List all existing SQLite investigation cases stored in the cases/ directory."""
     cases_dir = Path("cases")
     db_files = list(cases_dir.glob("*.db")) if cases_dir.exists() else []
-
     if not db_files:
         console.print("[yellow]No investigation cases found yet.[/yellow]")
         return

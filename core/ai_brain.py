@@ -67,7 +67,7 @@ Rules:
 1. Extract clean usernames from local paths (e.g., '/home/rahul_scammer/Desktop' -> USERNAME: 'rahul_scammer').
 2. Extract clean domains from URLs or custom emails (ignore gmail.com, protonmail.com, outlook.com for DOMAIN recon, but keep them for EMAIL recon).
 3. NEVER recommend any target already listed in 'already_scanned_targets'.
-4. Allowed target_type values ONLY: "DOMAIN", "EMAIL", "USERNAME".
+4. Allowed target_type values ONLY: "DOMAIN", "EMAIL", "USERNAME", "PHONE".
 5. Return ONLY valid JSON (no markdown, no extra text) in this exact format:
 {{
   "summary": "2-3 sentence assessment of what the evidence currently points to.",

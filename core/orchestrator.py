@@ -5,13 +5,15 @@ from core.ai_brain import AIBrain
 from core.config import ConfigManager
 from core.database import CaseDatabase
 from modules.domain_recon import DomainRecon
-from modules.identity_recon import IdentityRecon
+from modules.email_osint import EmailOSINT
+from modules.phone_osint import PhoneOSINT
+from modules.username_osint import UsernameOSINT
 
 
 class AutoPivotOrchestrator:
     """
-    Controls the Autonomous AI Pivot Loop:
-    Reads Case DB -> Asks AI Brain -> Runs Domain/Identity Recon -> Repeats up to max_depth.
+    Controls both direct OSINT routing and the Autonomous AI Pivot Loop
+    across Domain, Phone, Email, and Username OSINT engines.
     """
 
     def __init__(self, db: CaseDatabase, config: ConfigManager, console: Console):
@@ -19,48 +21,49 @@ class AutoPivotOrchestrator:
         self.config = config
         self.console = console
 
-        # Initialize all Engine 2 components
+        # Initialize AI Brain and all Phase 2 & Phase 3 OSINT modules
         self.ai_brain = AIBrain(config=config)
         self.domain_recon = DomainRecon(db=db, config=config)
-        self.identity_recon = IdentityRecon(db=db, config=config)
+        self.phone_osint = PhoneOSINT(db=db)
+        self.email_osint = EmailOSINT(db=db, config=config)
+        self.username_osint = UsernameOSINT(db=db, config=config)
 
-        # Track scanned targets in lowercase to prevent infinite loops
         self.visited_targets = set()
 
     def run_single_recon(self, target: str, target_type: str) -> Dict[str, Any]:
-        # Route the target to the right OSINT module based on its type
+        # Route the target to the appropriate Phase 2 or Phase 3 OSINT engine
         target_clean = target.strip()
         t_type = target_type.upper()
 
         if t_type == "DOMAIN":
             return self.domain_recon.analyze_domain(target_clean)
-        elif t_type in ("EMAIL", "USERNAME"):
-            return self.identity_recon.analyze_identity(target_clean, target_type=t_type)
+        elif t_type == "EMAIL":
+            return self.email_osint.analyze_email(target_clean)
+        elif t_type == "USERNAME":
+            return self.username_osint.analyze_username(target_clean)
+        elif t_type == "PHONE":
+            return self.phone_osint.analyze_phone(target_clean)
         else:
             return {"error": f"Unsupported target type: {t_type}"}
 
     def run_autopivot(self, max_depth: int = 2) -> Dict[str, Any]:
-        # Run the autonomous AI-driven investigation loop
         all_executed_pivots: List[Dict[str, Any]] = []
         final_summary = ""
 
-        # Pre-populate visited targets from existing OSINT findings in the DB
         for finding in self.db.get_all_osint_findings():
             self.visited_targets.add(finding["target"].lower())
 
         for depth in range(1, max_depth + 1):
             self.console.print(f"\n[bold cyan]━━━ AI Pivot Depth {depth}/{max_depth} ━━━[/bold cyan]")
 
-            # 1. Pull latest evidence from SQLite Case DB
             iocs = self.db.get_all_iocs()
             secrets = self.db.get_all_secrets()
             osint_findings = self.db.get_all_osint_findings()
 
             if not iocs and not secrets and not osint_findings:
-                self.console.print("[yellow]No evidence in case DB yet. Run 'analyze' or 'recon' first.[/yellow]")
+                self.console.print("[yellow]No evidence in case DB yet. Run 'analyze', 'recon', 'phone', 'email', or 'username' first.[/yellow]")
                 break
 
-            # 2. Ask Gemini AI Brain for next pivot recommendations
             with self.console.status("[bold magenta]Gemini AI Brain is analyzing clues...[/bold magenta]", spinner="dots"):
                 ai_decision = self.ai_brain.decide_next_pivots(
                     iocs=iocs,
@@ -78,7 +81,6 @@ class AutoPivotOrchestrator:
                 self.console.print("[green]No new high-value pivots remaining. Stopping loop.[/green]")
                 break
 
-            # 3. Execute each AI-recommended pivot
             for pivot in pivots:
                 target = str(pivot.get("target", "")).strip()
                 t_type = str(pivot.get("target_type", "")).upper()
@@ -91,7 +93,6 @@ class AutoPivotOrchestrator:
                 self.visited_targets.add(target.lower())
                 self.console.print(f"  [bold yellow]↳ Pivoting to [{t_type}]:[/bold yellow] {target} [dim]({reason})[/dim]")
 
-                # Record the AI decision in SQLite
                 self.db.add_ai_pivot(
                     depth_level=depth,
                     source_clue=source_clue,
@@ -101,8 +102,7 @@ class AutoPivotOrchestrator:
                     status="EXECUTED",
                 )
 
-                # Execute the appropriate OSINT module
-                with self.console.status(f"[green]Running {t_type} recon on {target}...[/green]", spinner="dots"):
+                with self.console.status(f"[green]Running {t_type} OSINT on {target}...[/green]", spinner="dots"):
                     self.run_single_recon(target, t_type)
 
                 all_executed_pivots.append({
