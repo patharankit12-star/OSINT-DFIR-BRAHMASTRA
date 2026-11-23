@@ -8,7 +8,7 @@ from core.config import ConfigManager
 
 class AIBrain:
     """
-    Uses Gemini API with automatic model fallback to analyze DFIR/OSINT evidence
+    Uses Gemini API with dynamic model auto-discovery to analyze DFIR/OSINT evidence
     and recommend the next high-value pivot targets.
     """
 
@@ -16,19 +16,28 @@ class AIBrain:
         self.api_key = config.get_api_key("gemini")
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
 
-        # Auto-fallback list: tries each model in order until one succeeds
-        self.fallback_models = [
-            "gemini-2.0-flash",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash-lite",
-            "gemini-1.5-flash",
-        ]
-
     def _clean_json_response(self, raw_text: str) -> str:
         # Remove markdown code fences (```json ... ```) if present
         cleaned = re.sub(r"^```(?:json)?\s*", "", raw_text.strip(), flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*```$", "", cleaned)
         return cleaned.strip()
+
+    def _discover_flash_models(self) -> List[str]:
+        # Dynamically fetch active Gemini Flash text models available for this API key
+        discovered = []
+        skip_keywords = ("image", "audio", "tts", "video", "embedding", "robotics", "computer")
+        try:
+            for m in self.client.models.list():
+                name = m.name.replace("models/", "")
+                lower_name = name.lower()
+                if "gemini" in lower_name and "flash" in lower_name:
+                    if not any(bad in lower_name for bad in skip_keywords):
+                        discovered.append(name)
+        except Exception:
+            pass
+
+        # Fallback defaults if listing fails
+        return discovered if discovered else ["gemini-2.5-flash", "gemini-2.0-flash"]
 
     def decide_next_pivots(
         self,
@@ -39,7 +48,7 @@ class AIBrain:
     ) -> Dict[str, Any]:
         if not self.client:
             return {
-                "summary": "Gemini API key not configured. Skipping AI pivot reasoning.",
+                "summary": "Gemini API key not configured in config.yaml. Skipping AI pivot.",
                 "pivots": [],
             }
 
@@ -76,9 +85,11 @@ Case Evidence:
 {json.dumps(evidence_payload, indent=2)}
 """
 
-        last_error = ""
-        # Try each model in fallback_models until one works
-        for model_name in self.fallback_models:
+        candidate_models = self._discover_flash_models()
+        errors = []
+
+        # Try up to 4 discovered models until one returns valid JSON
+        for model_name in candidate_models[:4]:
             try:
                 response = self.client.models.generate_content(
                     model=model_name,
@@ -91,11 +102,10 @@ Case Evidence:
                     "pivots": parsed.get("pivots", [])[:5],
                 }
             except Exception as e:
-                last_error = f"{model_name}: {str(e)}"
-                # If 404 or unsupported, automatically try the next model
+                errors.append(f"{model_name} -> {str(e)[:120]}")
                 continue
 
         return {
-            "summary": f"All Gemini models failed. Last error: {last_error}",
+            "summary": "All Gemini models failed: " + " | ".join(errors),
             "pivots": [],
         }
