@@ -115,27 +115,70 @@ def recon(
     orchestrator = AutoPivotOrchestrator(db=db, config=config, console=console)
 
     try:
-        with console.status(f"[bold green]Running {target_type} recon on {target}...[/bold green]", spinner="dots"):
+        with console.status(
+            f"[bold green]Running {target_type} recon on {target} (high-latency mode)...[/bold green]",
+            spinner="dots",
+        ):
             orchestrator.run_single_recon(target, target_type)
 
-        # Display all OSINT findings saved for this target
-        findings = db.get_all_osint_findings()
-        table = Table(title=f"OSINT Findings in Case: {case}", border_style="cyan")
-        table.add_column("Target", style="bold white")
-        table.add_column("Source", style="yellow")
-        table.add_column("Type", style="magenta")
-        table.add_column("Value", style="green")
+        # Fetch findings and group them cleanly by tool in a single unified table
+        all_findings = db.get_all_osint_findings()
+        target_clean = target.strip().lower()
+        # Filter findings for the current target
+        findings = [f for f in all_findings if f["target"].lower() == target_clean or target_clean in f["target"].lower()]
 
-        for f in findings[-30:]:  # Show latest 30 findings for clean output
-            table.add_row(f["target"], f["source_tool"], f["finding_type"], f["finding_value"])
-        console.print(table)
+        # Define exact display order for tools
+        tool_order = [
+            "whois",
+            "dns",
+            "crt.sh",
+            "virustotal",
+            "hunter_io",
+            "github_api",
+            "github_patch",
+            "github_search",
+            "holehe",
+        ]
+
+        # Group findings by source_tool
+        grouped = {}
+        for f in findings:
+            src = f["source_tool"]
+            grouped.setdefault(src, []).append(f)
+
+        table = Table(title=f"OSINT Recon Report: {target} (Case: {case})", border_style="cyan")
+        table.add_column("Source Tool", style="bold yellow")
+        table.add_column("Field / Type", style="bold magenta")
+        table.add_column("Extracted Value", style="green")
+
+        # Add each tool's section with a blank spacer line between tools
+        added_sections = 0
+        ordered_tools = [t for t in tool_order if t in grouped] + [t for t in grouped if t not in tool_order]
+
+        for tool_name in ordered_tools:
+            if added_sections > 0:
+                # Add one blank line space between different tool results
+                table.add_row("", "", "")
+
+            rows = grouped[tool_name]
+            for idx, item in enumerate(rows):
+                # Show tool name on the first row of its block for clean readability
+                label = tool_name.upper() if idx == 0 else ""
+                table.add_row(label, item["finding_type"], item["finding_value"])
+
+            added_sections += 1
+
+        if added_sections > 0:
+            console.print(table)
+        else:
+            console.print("[yellow]No OSINT findings returned for this target.[/yellow]")
+
         console.print(f"\n[bold green]✔ Recon complete! Saved to cases/{case}.db[/bold green]")
 
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
     finally:
         db.close()
-
 
 @app.command()
 def autopivot(

@@ -16,7 +16,7 @@ class AIBrain:
         self.api_key = config.get_api_key("gemini")
         self.client = genai.Client(api_key=self.api_key) if self.api_key else None
         # Fast, free-tier friendly Gemini model for structured reasoning
-        self.model_name = "gemini-2.5-flash"
+        self.model_name = "gemini-flash-lite-latest"
 
     def _clean_json_response(self, raw_text: str) -> str:
         # Remove markdown code fences (```json ... ```) if the model includes them

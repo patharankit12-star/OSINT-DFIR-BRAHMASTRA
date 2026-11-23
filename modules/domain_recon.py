@@ -1,3 +1,4 @@
+import socket
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 import dns.resolver
@@ -11,60 +12,77 @@ from core.database import CaseDatabase
 class DomainRecon:
     """
     Engine 2 (Part A): Performs multi-source domain intelligence gathering using
-    WHOIS, DNS, crt.sh, VirusTotal API, and Hunter.io API.
+    WHOIS (detailed), DNS, crt.sh, VirusTotal API, and Hunter.io API with high timeouts.
     """
 
     def __init__(self, db: CaseDatabase, config: ConfigManager):
-        # Connect to the active SQLite case database and API config manager
         self.db = db
         self.config = config
         self.headers = {"User-Agent": "OSINT-DFIR-Brahmastra/1.0"}
 
     def clean_domain(self, raw_target: str) -> str:
-        # Remove http://, https://, paths, and extra spaces to get a clean domain name
+        # Remove http://, https://, paths, and ports to get a clean domain name
         target = raw_target.strip().lower()
         if target.startswith(("http://", "https://")):
             target = urlparse(target).netloc
         return target.split("/")[0].split(":")[0]
 
+    def _first_val(self, val: Any) -> str:
+        # Helper to safely extract a single clean string if python-whois returns a list
+        if isinstance(val, list) and len(val) > 0:
+            return str(val[0])
+        return str(val) if val else ""
+
     def run_whois(self, domain: str) -> Dict[str, Any]:
-        # Fetch WHOIS registration details (Registrar, Creation Date, Emails)
+        # Fetch rich WHOIS details + primary IP address
         results = {}
         try:
+            # 1. Resolve primary IPv4 address for quick reference
+            try:
+                ip_addr = socket.gethostbyname(domain)
+                results["ip"] = ip_addr
+                self.db.add_osint_finding(domain, "DOMAIN", "whois", "IP_ADDRESS", ip_addr)
+            except Exception:
+                pass
+
+            # 2. Query WHOIS server
             w = whois.whois(domain)
-            registrar = w.registrar
-            creation_date = w.creation_date
-            emails = w.emails
 
-            # Handle cases where python-whois returns a list instead of a single value
-            if isinstance(creation_date, list):
-                creation_date = creation_date[0]
+            fields_map = {
+                "DOMAIN_NAME": self._first_val(w.domain_name),
+                "REGISTRAR": self._first_val(w.registrar),
+                "CREATION_DATE": self._first_val(w.creation_date),
+                "EXPIRATION_DATE": self._first_val(w.expiration_date),
+                "UPDATED_DATE": self._first_val(w.updated_date),
+                "ORGANIZATION": self._first_val(w.org),
+                "STATE": self._first_val(w.state),
+                "COUNTRY": self._first_val(w.country),
+            }
 
-            if registrar:
-                results["registrar"] = str(registrar)
-                self.db.add_osint_finding(domain, "DOMAIN", "whois", "REGISTRAR", str(registrar))
+            for tag, value in fields_map.items():
+                if value and value.lower() != "none":
+                    results[tag.lower()] = value
+                    self.db.add_osint_finding(domain, "DOMAIN", "whois", tag, value)
 
-            if creation_date:
-                results["creation_date"] = str(creation_date)
-                self.db.add_osint_finding(domain, "DOMAIN", "whois", "CREATION_DATE", str(creation_date))
-
-            if emails:
-                email_list = emails if isinstance(emails, list) else [emails]
+            # Save any public WHOIS emails
+            if w.emails:
+                email_list = w.emails if isinstance(w.emails, list) else [w.emails]
                 results["emails"] = email_list
                 for email in set(email_list):
-                    self.db.add_osint_finding(domain, "DOMAIN", "whois", "EMAIL", str(email))
+                    if email:
+                        self.db.add_osint_finding(domain, "DOMAIN", "whois", "EMAIL", str(email))
 
         except Exception as e:
-            results["error"] = f"WHOIS failed: {str(e)}"
+            results["error"] = f"WHOIS skipped: {str(e)}"
         return results
 
     def run_dns(self, domain: str) -> Dict[str, List[str]]:
-        # Query A, MX, NS, and TXT DNS records
+        # Query A, MX, NS, and TXT DNS records with increased timeout (20s)
         record_types = ["A", "MX", "NS", "TXT"]
         dns_results: Dict[str, List[str]] = {}
         resolver = dns.resolver.Resolver()
-        resolver.timeout = 5
-        resolver.lifetime = 5
+        resolver.timeout = 15
+        resolver.lifetime = 20
 
         for rtype in record_types:
             try:
@@ -75,38 +93,38 @@ class DomainRecon:
                 for val in values:
                     self.db.add_osint_finding(domain, "DOMAIN", "dns", f"DNS_{rtype}", val)
             except Exception:
-                # Skip record types that do not exist for this domain
+                # Skip missing record types gracefully
                 continue
 
         return dns_results
 
     def run_crtsh(self, domain: str) -> List[str]:
-        # Query crt.sh Certificate Transparency logs for free passive subdomains
+        # Query crt.sh with higher timeout (45s) because crt.sh can be slow
         subdomains = set()
         url = f"https://crt.sh/?q=%.{domain}&output=json"
 
         try:
-            resp = requests.get(url, headers=self.headers, timeout=20)
+            resp = requests.get(url, headers=self.headers, timeout=45)
             if resp.status_code == 200:
                 data = resp.json()
                 for entry in data:
                     name_value = entry.get("name_value", "")
-                    # Some certificates contain multiple domains separated by newlines
                     for sub in name_value.split("\n"):
                         sub = sub.strip().lower().lstrip("*.")
                         if sub.endswith(domain) and sub != domain:
                             subdomains.add(sub)
 
-                # Save discovered subdomains to the SQLite database (limit top 50 to avoid noise)
-                for sub in sorted(subdomains)[:50]:
+                # Save top 30 unique subdomains to keep DB and output clean
+                for sub in sorted(subdomains)[:30]:
                     self.db.add_osint_finding(domain, "DOMAIN", "crt.sh", "SUBDOMAIN", sub)
         except Exception:
+            # Skip gracefully if crt.sh times out or returns 502/503
             pass
 
-        return sorted(subdomains)[:50]
+        return sorted(subdomains)[:30]
 
     def run_virustotal(self, domain: str) -> Dict[str, Any]:
-        # Check domain reputation and passive subdomains using VirusTotal API v3
+        # Check VirusTotal API v3 with increased timeout (30s)
         api_key = self.config.get_api_key("virustotal")
         if not api_key:
             return {"skipped": "No VirusTotal API key configured"}
@@ -115,9 +133,8 @@ class DomainRecon:
         vt_headers = {"x-apikey": api_key}
 
         try:
-            # 1. Get main domain reputation and analysis stats
             url = f"https://www.virustotal.com/api/v3/domains/{domain}"
-            resp = requests.get(url, headers=vt_headers, timeout=15)
+            resp = requests.get(url, headers=vt_headers, timeout=30)
 
             if resp.status_code == 200:
                 attrs = resp.json().get("data", {}).get("attributes", {})
@@ -135,9 +152,9 @@ class DomainRecon:
                     domain, "DOMAIN", "virustotal", "REPUTATION", summary_str, raw_data=stats
                 )
 
-            # 2. Fetch up to 20 passive subdomains from VirusTotal
-            sub_url = f"https://www.virustotal.com/api/v3/domains/{domain}/subdomains?limit=20"
-            sub_resp = requests.get(sub_url, headers=vt_headers, timeout=15)
+            # Fetch passive subdomains from VirusTotal
+            sub_url = f"https://www.virustotal.com/api/v3/domains/{domain}/subdomains?limit=15"
+            sub_resp = requests.get(sub_url, headers=vt_headers, timeout=30)
             if sub_resp.status_code == 200:
                 vt_subs = [item.get("id") for item in sub_resp.json().get("data", []) if item.get("id")]
                 vt_results["subdomains"] = vt_subs
@@ -145,12 +162,12 @@ class DomainRecon:
                     self.db.add_osint_finding(domain, "DOMAIN", "virustotal", "SUBDOMAIN", sub)
 
         except Exception as e:
-            vt_results["error"] = f"VirusTotal API error: {str(e)}"
+            vt_results["error"] = f"VirusTotal skipped: {str(e)}"
 
         return vt_results
 
     def run_hunter(self, domain: str) -> List[Dict[str, str]]:
-        # Search for corporate employee emails using Hunter.io API
+        # Search for corporate emails using Hunter.io API with increased timeout (30s)
         api_key = self.config.get_api_key("hunter_io")
         if not api_key:
             return []
@@ -159,7 +176,7 @@ class DomainRecon:
         url = f"https://api.hunter.io/v2/domain-search?domain={domain}&api_key={api_key}"
 
         try:
-            resp = requests.get(url, headers=self.headers, timeout=15)
+            resp = requests.get(url, headers=self.headers, timeout=30)
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 for person in data.get("emails", []):
@@ -176,7 +193,7 @@ class DomainRecon:
         return emails_found
 
     def analyze_domain(self, raw_target: str) -> Dict[str, Any]:
-        # Main orchestrator method for Domain Recon
+        # Run all 5 sources sequentially; each skips gracefully on error
         domain = self.clean_domain(raw_target)
 
         whois_data = self.run_whois(domain)
@@ -185,7 +202,6 @@ class DomainRecon:
         vt_data = self.run_virustotal(domain)
         hunter_emails = self.run_hunter(domain)
 
-        # Log completion in Chain of Custody
         self.db.log_action(
             "DOMAIN_RECON_COMPLETE",
             f"Target: {domain} | crt.sh subs: {len(crtsh_subs)} | Hunter emails: {len(hunter_emails)}",
