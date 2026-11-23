@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 import dns.resolver
 import requests
 import whois
+import time
 
 from core.config import ConfigManager
 from core.database import CaseDatabase
@@ -99,29 +100,60 @@ class DomainRecon:
         return dns_results
 
     def run_crtsh(self, domain: str) -> List[str]:
-        # Query crt.sh with higher timeout (45s) because crt.sh can be slow
+        # Query crt.sh with deduplication + retry, and fallback to HackerTarget if crt.sh is down
         subdomains = set()
-        url = f"https://crt.sh/?q=%.{domain}&output=json"
+        crt_url = f"https://crt.sh/?q=%25.{domain}&output=json&deduplicate=Y"
+        browser_headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        }
 
+        crt_success = False
+        # Try crt.sh up to 2 times (handles temporary 502/503 server spikes)
+        for attempt in range(2):
+            try:
+                resp = requests.get(crt_url, headers=browser_headers, timeout=25)
+                if resp.status_code == 200 and resp.text.strip().startswith("["):
+                    data = resp.json()
+                    for entry in data:
+                        name_value = entry.get("name_value", "")
+                        for sub in name_value.split("\n"):
+                            sub = sub.strip().lower().lstrip("*.")
+                            if sub.endswith(domain) and sub != domain and " " not in sub:
+                                subdomains.add(sub)
+                    crt_success = True
+                    break
+                else:
+                    time.sleep(2)
+            except Exception:
+                time.sleep(2)
+
+        # Save crt.sh subdomains if found
+        if crt_success and subdomains:
+            for sub in sorted(subdomains)[:25]:
+                self.db.add_osint_finding(domain, "DOMAIN", "crt.sh", "SUBDOMAIN", sub)
+            return sorted(subdomains)[:25]
+
+        # Automatic Free Fallback: HackerTarget API (runs only if crt.sh failed or returned empty)
         try:
-            resp = requests.get(url, headers=self.headers, timeout=45)
-            if resp.status_code == 200:
-                data = resp.json()
-                for entry in data:
-                    name_value = entry.get("name_value", "")
-                    for sub in name_value.split("\n"):
-                        sub = sub.strip().lower().lstrip("*.")
+            ht_url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
+            ht_resp = requests.get(ht_url, headers=browser_headers, timeout=20)
+            if ht_resp.status_code == 200 and "error" not in ht_resp.text.lower():
+                for line in ht_resp.text.splitlines():
+                    if "," in line:
+                        sub = line.split(",")[0].strip().lower()
                         if sub.endswith(domain) and sub != domain:
                             subdomains.add(sub)
 
-                # Save top 30 unique subdomains to keep DB and output clean
-                for sub in sorted(subdomains)[:30]:
-                    self.db.add_osint_finding(domain, "DOMAIN", "crt.sh", "SUBDOMAIN", sub)
-        except Exception:
-            # Skip gracefully if crt.sh times out or returns 502/503
-            pass
+            if subdomains:
+                for sub in sorted(subdomains)[:25]:
+                    self.db.add_osint_finding(domain, "DOMAIN", "crt.sh", "SUBDOMAIN", f"{sub} (via fallback)")
+            else:
+                self.db.add_osint_finding(domain, "DOMAIN", "crt.sh", "STATUS", "No subdomains found")
+        except Exception as e:
+            self.db.add_osint_finding(domain, "DOMAIN", "crt.sh", "STATUS", f"Skipped ({type(e).__name__})")
 
-        return sorted(subdomains)[:30]
+        return sorted(subdomains)[:25]
 
     def run_virustotal(self, domain: str) -> Dict[str, Any]:
         # Check VirusTotal API v3 with increased timeout (30s)
