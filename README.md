@@ -48,7 +48,7 @@ Installed automatically via `requirements.txt`:
 
 ### 1. Clone the Repository
 ```bash
-git clone [https://github.com/patharankit12-star/OSINT-DFIR-BRAHMASTRA.git](https://github.com/patharankit12-star/OSINT-DFIR-BRAHMASTRA.git)
+git clone https://github.com/patharankit12-star/OSINT-DFIR-BRAHMASTRA.git
 cd OSINT-DFIR-BRAHMASTRA
 ```
 
