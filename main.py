@@ -292,7 +292,7 @@ def report(
             f"{report_res['alerts']} Critical Alerts | {report_res['osint_findings']} OSINT Findings"
         )
         console.print(Panel(summary, title="[bold green]Phase 4 Deliverables Ready[/bold green]", border_style="green"))
-        console.print(f"\n[bold yellow]Tip:[/bold yellow] Browser mein kholne ke liye chalayein: [bold cyan]xdg-open {report_res['report_path']}[/bold cyan]")
+        console.print(f"\n[bold yellow]Tip:[/bold yellow] open in Browser : [bold cyan]xdg-open {report_res['report_path']}[/bold cyan]")
 
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
