@@ -9,6 +9,8 @@ from core.config import ConfigManager
 from core.database import CaseDatabase
 from core.orchestrator import AutoPivotOrchestrator
 from modules.dfir_extractor import DFIRExtractor
+from modules.graph_builder import GraphBuilder
+from modules.report_generator import ReportGenerator
 
 app = typer.Typer(help="OSINT-DFIR-BRAHMASTRA: Unified Forensic & OSINT Automation Framework")
 console = Console()
@@ -250,6 +252,52 @@ def list_cases():
         table.add_row(db_file.stem, str(db_file))
     console.print(table)
 
+@app.command()
+def report(
+    case: str = typer.Option(..., "--case", "-c", help="Name of the investigation case (e.g., master_case_01)"),
+):
+    """Engine 4: Generate Interactive Mini-Maltego HTML Graph and Court-Ready Forensic Report."""
+    console.print(
+        Panel.fit(
+            "[bold cyan]OSINT-DFIR-BRAHMASTRA[/bold cyan] | [bold green]Engine 4: Visual Graph & Forensic Report[/bold green]",
+            border_style="green",
+        )
+    )
+
+    db_path = Path("cases") / f"{case}.db"
+    if not db_path.exists():
+        console.print(f"[bold red]Error:[/bold red] Case database '{db_path}' nahi mila. Pehle koi scan run karein.")
+        raise typer.Exit(code=1)
+
+    db = CaseDatabase(case_name=case)
+    try:
+        # 1. Build Interactive Mini-Maltego HTML Graph
+        with console.status("[bold cyan]Building Mini-Maltego Interactive Graph...[/bold cyan]", spinner="dots"):
+            graph_builder = GraphBuilder(db=db, case_name=case)
+            graph_res = graph_builder.build_graph()
+
+        # 2. Generate Court-Ready Forensic HTML Report (linked to the graph)
+        with console.status("[bold green]Generating Court-Ready Forensic HTML Report...[/bold green]", spinner="dots"):
+            report_gen = ReportGenerator(db=db, case_name=case)
+            graph_filename = Path(graph_res["graph_path"]).name
+            report_res = report_gen.generate_report(graph_filename=graph_filename)
+
+        # 3. Display Summary Panel
+        summary = (
+            f"[bold white]Case ID:[/bold white] {case}\n"
+            f"[bold cyan]Interactive Graph:[/bold cyan] {graph_res['graph_path']} "
+            f"([yellow]{graph_res['nodes']} nodes, {graph_res['edges']} edges[/yellow])\n"
+            f"[bold green]Forensic Report:[/bold green] {report_res['report_path']}\n"
+            f"[bold white]Stats:[/bold white] {report_res['artifacts']} Artifacts | "
+            f"{report_res['alerts']} Critical Alerts | {report_res['osint_findings']} OSINT Findings"
+        )
+        console.print(Panel(summary, title="[bold green]Phase 4 Deliverables Ready[/bold green]", border_style="green"))
+        console.print(f"\n[bold yellow]Tip:[/bold yellow] Browser mein kholne ke liye chalayein: [bold cyan]xdg-open {report_res['report_path']}[/bold cyan]")
+
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     app()
